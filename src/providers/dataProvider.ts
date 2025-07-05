@@ -3,22 +3,186 @@ import { PublicKey } from '@solana/web3.js';
 import { TokenMetrics, TokenConfig } from '../types';
 import logger from '../utils/logger';
 
-export class DataProvider {
-  private readonly coingeckoApiKey?: string;
-  private readonly duneApiKey?: string;
-  private readonly baseUrl = 'https://api.coingecko.com/api/v3';
-  private readonly jupiterApiUrl = 'https://price.jup.ag/v4';
+interface RateLimiter {
+  requests: number;
+  resetTime: number;
+  maxRequests: number;
+  windowMs: number;
+}
 
-  constructor(coingeckoApiKey?: string, duneApiKey?: string) {
-    this.coingeckoApiKey = coingeckoApiKey;
+class APIQueue {
+  private queue: Array<() => Promise<any>> = [];
+  private processing = false;
+  private delay: number;
+
+  constructor(delay: number = 1000) {
+    this.delay = delay;
+  }
+
+  async add<T>(fn: () => Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      this.queue.push(async () => {
+        try {
+          const result = await fn();
+          resolve(result);
+        } catch (error) {
+          reject(error);
+        }
+      });
+      this.process();
+    });
+  }
+
+  private async process() {
+    if (this.processing || this.queue.length === 0) return;
+    
+    this.processing = true;
+    
+    while (this.queue.length > 0) {
+      const fn = this.queue.shift()!;
+      try {
+        await fn();
+      } catch (error) {
+        logger.error('Queue processing error:', error);
+      }
+      
+      if (this.queue.length > 0) {
+        await new Promise(resolve => setTimeout(resolve, this.delay));
+      }
+    }
+    
+    this.processing = false;
+  }
+}
+
+export class DataProvider {
+  private readonly duneApiKey?: string;
+  private readonly jupiterQuoteUrl = 'https://lite-api.jup.ag/swap/v1';
+  private readonly jupiterTokensUrl = 'https://lite-api.jup.ag/tokens/v1';
+  private readonly solMint = 'So11111111111111111111111111111111111111112';
+  private readonly birdseyeUrl = 'https://public-api.birdeye.so/defi';
+  
+  // Rate limiting properties
+  private readonly rateLimiter: RateLimiter;
+  private readonly apiQueue: APIQueue;
+  private readonly cache = new Map<string, { data: any; timestamp: number }>();
+  private readonly cacheTimeout = 60000; // 1 minute cache
+
+  constructor(duneApiKey?: string) {
     this.duneApiKey = duneApiKey;
+    
+    // Initialize rate limiter (Birdeye free tier: ~100 requests per minute)
+    this.rateLimiter = {
+      requests: 0,
+      resetTime: Date.now() + 60000, // 1 minute window
+      maxRequests: 50, // Conservative limit
+      windowMs: 60000 // 1 minute
+    };
+    
+    // Initialize API queue with 1.5 second delay between requests
+    this.apiQueue = new APIQueue(1500);
+    
+    logger.info('✓ DataProvider initialized with Jupiter APIs');
+    
+    // Log API key status
+    if (process.env.BIRDEYE_API_KEY) {
+      logger.info('✓ Birdeye API key configured');
+      logger.info(`✓ Rate limiter initialized: ${this.rateLimiter.maxRequests} requests per minute`);
+    } else {
+      logger.warn('⚠ Birdeye API key not configured - some features may be limited');
+    }
+  }
+
+  // Rate limiting and caching methods
+  private resetRateLimiterIfNeeded(): void {
+    const now = Date.now();
+    if (now >= this.rateLimiter.resetTime) {
+      this.rateLimiter.requests = 0;
+      this.rateLimiter.resetTime = now + this.rateLimiter.windowMs;
+    }
+  }
+
+  private canMakeRequest(): boolean {
+    this.resetRateLimiterIfNeeded();
+    return this.rateLimiter.requests < this.rateLimiter.maxRequests;
+  }
+
+  private incrementRequestCount(): void {
+    this.rateLimiter.requests++;
+  }
+
+  private getCacheKey(endpoint: string, params: Record<string, any>): string {
+    return `${endpoint}:${JSON.stringify(params)}`;
+  }
+
+  private getFromCache(key: string): any | null {
+    const cached = this.cache.get(key);
+    if (cached && Date.now() - cached.timestamp < this.cacheTimeout) {
+      return cached.data;
+    }
+    return null;
+  }
+
+  private setCache(key: string, data: any): void {
+    this.cache.set(key, { data, timestamp: Date.now() });
+  }
+
+  private async makeBirdeyeRequest(endpoint: string, params: Record<string, any>): Promise<any> {
+    const cacheKey = this.getCacheKey(endpoint, params);
+    
+    // Check cache first
+    const cached = this.getFromCache(cacheKey);
+    if (cached) {
+      logger.debug(`Cache hit for ${endpoint}`);
+      return cached;
+    }
+
+    // Use queue for rate limiting
+    return this.apiQueue.add(async () => {
+      // Double-check rate limit before making request
+      if (!this.canMakeRequest()) {
+        const waitTime = this.rateLimiter.resetTime - Date.now();
+        logger.warn(`Rate limit exceeded, waiting ${waitTime}ms`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        this.resetRateLimiterIfNeeded();
+      }
+
+      try {
+        this.incrementRequestCount();
+        
+        const response = await axios.get(`${this.birdseyeUrl}${endpoint}`, {
+          params,
+          headers: {
+            'X-API-KEY': process.env.BIRDEYE_API_KEY || '',
+          },
+          timeout: 10000, // 10 second timeout
+        });
+
+        const data = response.data;
+        
+        // Cache successful response
+        this.setCache(cacheKey, data);
+        
+        logger.debug(`Birdeye API request successful: ${endpoint}`);
+        return data;
+      } catch (error: any) {
+        if (error.response?.status === 429) {
+          logger.warn(`Rate limit hit for ${endpoint}, backing off`);
+          // Exponential backoff
+          const backoffTime = Math.min(5000 * Math.pow(2, this.rateLimiter.requests % 5), 30000);
+          await new Promise(resolve => setTimeout(resolve, backoffTime));
+          throw error;
+        }
+        throw error;
+      }
+    });
   }
 
   async getTokenMetrics(tokenConfig: TokenConfig): Promise<TokenMetrics | null> {
     try {
       const [priceData, marketData, volatilityData] = await Promise.all([
         this.getTokenPrice(tokenConfig.mint),
-        this.getMarketData(tokenConfig.symbol),
+        this.getMarketData(tokenConfig.mint),
         this.getVolatilityData(tokenConfig.mint)
       ]);
 
@@ -35,49 +199,74 @@ export class DataProvider {
         price: priceData.price,
         volatility: volatilityData || 0,
         age: await this.getTokenAge(tokenConfig.mint),
-        socialScore: await this.getSocialScore(tokenConfig.symbol),
+        socialScore: await this.getSocialScore(tokenConfig.mint),
         liquidity: await this.getLiquidityData(tokenConfig.mint)
       };
     } catch (error) {
-      logger.error(`Error fetching metrics for ${tokenConfig.symbol}:`, error);
+      logger.error(`Error fetching metrics for ${tokenConfig.symbol}: ${error instanceof Error ? error.message : String(error)}`);
       return null;
     }
   }
 
   private async getTokenPrice(mint: string): Promise<{ price: number } | null> {
     try {
-      const response = await axios.get(`${this.jupiterApiUrl}/price`, {
-        params: { ids: mint }
+      // Use Quote API to get price by requesting a small quote from SOL to target token
+      const response = await axios.get(`${this.jupiterQuoteUrl}/quote`, {
+        params: {
+          inputMint: this.solMint,
+          outputMint: mint,
+          amount: 1000000000, // 1 SOL in lamports
+          slippageBps: 50
+        }
       });
       
-      return response.data.data?.[mint] || null;
+      if (response.data?.outAmount && response.data?.inAmount) {
+        // Calculate price: output amount / input amount
+        const price = parseFloat(response.data.outAmount) / parseFloat(response.data.inAmount);
+        return { price };
+      }
+      
+      return null;
     } catch (error) {
-      logger.error(`Error fetching price for ${mint}:`, error);
+      logger.error(`Error fetching price for ${mint}: ${error instanceof Error ? error.message : String(error)}`);
       return null;
     }
   }
 
-  private async getMarketData(symbol: string): Promise<any> {
+  private async getMarketData(mint: string): Promise<any> {
     try {
-      const headers = this.coingeckoApiKey ? {
-        'x-cg-pro-api-key': this.coingeckoApiKey
-      } : {};
-
-      const response = await axios.get(`${this.baseUrl}/coins/markets`, {
-        params: {
-          vs_currency: 'usd',
-          ids: symbol.toLowerCase(),
-          order: 'market_cap_desc',
-          per_page: 1,
-          page: 1
-        },
-        headers
+      // Use rate-limited Birdeye API for comprehensive token data
+      const response = await this.makeBirdeyeRequest('/token_overview', {
+        address: mint
       });
 
-      return response.data[0] || null;
+      const data = response?.data;
+      if (!data) return null;
+
+      return {
+        market_cap: data.mc || 0,
+        total_volume: data.v24hUSD || 0,
+        liquidity: data.liquidity || 0,
+        price: data.price || 0
+      };
     } catch (error) {
-      logger.error(`Error fetching market data for ${symbol}:`, error);
-      return null;
+      logger.warn(`Birdeye API failed for ${mint}, using Jupiter fallback: ${error instanceof Error ? error.message : String(error)}`);
+      
+      // Fallback to Jupiter token info (correct endpoint: /token/ not /tokens/)
+      try {
+        const tokenResponse = await axios.get(`${this.jupiterTokensUrl}/token/${mint}`);
+        const token = tokenResponse.data;
+        
+        return {
+          market_cap: token.marketCap || 0,
+          total_volume: token.volume24h || 0,
+          liquidity: token.liquidity || 0,
+          price: token.price || 0
+        };
+      } catch (fallbackError) {
+        logger.error(`Error fetching market data for ${mint}: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`);
+        return null;
+      }
     }
   }
 
@@ -100,21 +289,36 @@ export class DataProvider {
 
       return volatility;
     } catch (error) {
-      logger.error(`Error calculating volatility for ${mint}:`, error);
+      logger.error(`Error calculating volatility for ${mint}: ${error instanceof Error ? error.message : String(error)}`);
       return 0;
     }
   }
 
   private async getPriceHistory(mint: string, days: number): Promise<Array<{ price: number; timestamp: number }> | null> {
     try {
-      // This is a simplified implementation
-      // In production, you'd use a proper API for historical data
-      const response = await axios.get(`${this.jupiterApiUrl}/price`, {
-        params: { ids: mint }
-      });
+      // Use rate-limited Birdeye API for historical price data
+      const endTime = Math.floor(Date.now() / 1000);
+      const startTime = endTime - (days * 24 * 60 * 60);
       
-      // Mock historical data for demonstration
-      const currentPrice = response.data.data?.[mint]?.price || 0;
+      const response = await this.makeBirdeyeRequest('/history_price', {
+        address: mint,
+        address_type: 'token',
+        type: '1D',
+        time_from: startTime,
+        time_to: endTime
+      });
+
+      const data = response?.data?.items;
+      if (data && Array.isArray(data)) {
+        return data.map((item: any) => ({
+          price: item.value || 0,
+          timestamp: item.unixTime * 1000
+        }));
+      }
+
+      // Fallback: get current price and simulate history
+      const currentPriceData = await this.getTokenPrice(mint);
+      const currentPrice = currentPriceData?.price || 0;
       const history = [];
       
       for (let i = 0; i < days; i++) {
@@ -128,40 +332,96 @@ export class DataProvider {
       
       return history;
     } catch (error) {
-      logger.error(`Error fetching price history for ${mint}:`, error);
+      logger.error(`Error fetching price history for ${mint}: ${error instanceof Error ? error.message : String(error)}`);
       return null;
     }
   }
 
   private async getTokenAge(mint: string): Promise<number> {
     try {
-      // Simplified implementation - would need to query token creation date
-      // This is a placeholder that returns random age between 30-365 days
-      return Math.floor(Math.random() * 335) + 30;
+      // Use rate-limited Birdeye API to get token creation info
+      const response = await this.makeBirdeyeRequest('/token_creation_info', {
+        address: mint
+      });
+
+      const creationTime = response?.data?.creation_time;
+      if (creationTime) {
+        const ageMs = Date.now() - (creationTime * 1000);
+        return Math.floor(ageMs / (24 * 60 * 60 * 1000)); // Convert to days
+      }
+
+      // Fallback: use Jupiter tokens list (correct endpoint: /token/ not /tokens/)
+      const tokenResponse = await axios.get(`${this.jupiterTokensUrl}/token/${mint}`);
+      const token = tokenResponse.data;
+      
+      if (token?.createdAt) {
+        const ageMs = Date.now() - new Date(token.createdAt).getTime();
+        return Math.floor(ageMs / (24 * 60 * 60 * 1000));
+      }
+
+      // Default fallback
+      return 90; // Assume 90 days if can't determine
     } catch (error) {
-      logger.error(`Error fetching token age for ${mint}:`, error);
-      return 0;
+      logger.warn(`Could not determine token age for ${mint}, using default: ${error instanceof Error ? error.message : String(error)}`);
+      return 90; // Conservative default
     }
   }
 
-  private async getSocialScore(symbol: string): Promise<number> {
+  private async getSocialScore(mint: string): Promise<number> {
     try {
-      // Simplified social score calculation
-      // In production, integrate with LunarCrush or similar APIs
-      return Math.random() * 100; // 0-100 score
+      // Use rate-limited Birdeye API for token overview data
+      const response = await this.makeBirdeyeRequest('/token_overview', {
+        address: mint
+      });
+
+      const data = response?.data;
+      if (data) {
+        // Calculate score based on available metrics from token overview
+        const volumeScore = data.v24hUSD ? Math.min(data.v24hUSD / 1000000, 30) : 0; // Volume score
+        const liquidityScore = data.liquidity ? Math.min(data.liquidity / 5000000, 30) : 0; // Liquidity score
+        const priceScore = data.priceChange24h ? Math.min(Math.abs(data.priceChange24h) / 10, 20) : 0; // Price movement score
+        const marketScore = data.mc ? Math.min(data.mc / 100000000, 20) : 0; // Market cap score
+        
+        return Math.min(volumeScore + liquidityScore + priceScore + marketScore, 100);
+      }
+
+      return 50; // Default moderate score
     } catch (error) {
-      logger.error(`Error fetching social score for ${symbol}:`, error);
-      return 0;
+      logger.warn(`Could not fetch social score for ${mint}: ${error instanceof Error ? error.message : String(error)}`);
+      return 50; // Default moderate score
     }
   }
 
   private async getLiquidityData(mint: string): Promise<number> {
     try {
-      // Simplified liquidity calculation
-      // In production, aggregate from multiple DEXs
-      return Math.random() * 10000000; // $0-10M liquidity
+      // Get liquidity from multiple sources
+      const [birdeyeResponse, jupiterResponse] = await Promise.allSettled([
+        this.makeBirdeyeRequest('/token_overview', { address: mint }),
+        axios.get(`${this.jupiterTokensUrl}/token/${mint}`)
+      ]);
+
+      let totalLiquidity = 0;
+
+      // Birdeye liquidity data
+      if (birdeyeResponse.status === 'fulfilled') {
+        const birdeyeLiq = birdeyeResponse.value?.data?.liquidity || 0;
+        totalLiquidity += birdeyeLiq;
+      }
+
+      // Jupiter liquidity data
+      if (jupiterResponse.status === 'fulfilled') {
+        const jupiterLiq = jupiterResponse.value.data?.liquidity || 0;
+        totalLiquidity += jupiterLiq;
+      }
+
+      // If we got data from both, average them to avoid double counting
+      if (birdeyeResponse.status === 'fulfilled' && jupiterResponse.status === 'fulfilled') {
+        totalLiquidity = totalLiquidity / 2;
+      }
+
+      return totalLiquidity;
     } catch (error) {
-      logger.error(`Error fetching liquidity for ${mint}:`, error);
+      logger.error(`Error fetching liquidity for ${mint}: ${error instanceof Error ? error.message : String(error)}`);
       return 0;
     }
   }

@@ -102,7 +102,6 @@ export class MemePoolStrategy {
 
   private initializeProviders(): void {
     this.dataProvider = new DataProvider(
-      process.env.COINGECKO_API_KEY,
       process.env.DUNE_API_KEY
     );
     this.positionManager = new PositionManager(this.connection, this.wallet, this.config);

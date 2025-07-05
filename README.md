@@ -32,7 +32,7 @@ This strategy implements the meme-pool fee-harvest methodology described in the 
 ### Prerequisites
 - Node.js 18+ and npm
 - Solana wallet with SOL for gas fees
-- API keys for CoinGecko (optional but recommended)
+- API key for Birdeye (recommended for comprehensive data)
 
 ### Installation
 
@@ -208,7 +208,7 @@ All activities are logged with different levels:
 ```
 src/
 ├── types/              # TypeScript type definitions
-├── providers/          # Data providers (CoinGecko, Jupiter, etc.)
+├── providers/          # Data providers (Jupiter, Birdeye, etc.)
 ├── managers/           # Position and risk managers
 ├── utils/              # Utilities (logger, etc.)
 ├── strategy.ts         # Main strategy implementation
