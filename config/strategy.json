@@ -1,0 +1,78 @@
+{
+  "strategy": {
+    "name": "Meme Pool Fee Harvest",
+    "version": "1.0.0",
+    "maxPositions": 5,
+    "capitalPerPool": 0.05,
+    "rebalanceInterval": "7d"
+  },
+  "filters": {
+    "minMarketCap": 200000000,
+    "minVolumeRatio": 0.15,
+    "minAge": 60,
+    "requiredSocial": true
+  },
+  "volatilityTiers": {
+    "low": {
+      "threshold": 0.05,
+      "feeRate": 0.0005
+    },
+    "medium": {
+      "threshold": 0.15,
+      "feeRate": 0.003
+    },
+    "high": {
+      "threshold": 1.0,
+      "feeRate": 0.01
+    }
+  },
+  "positionConfig": {
+    "coreRange": {
+      "percentage": 0.15,
+      "allocation": 0.6
+    },
+    "outerRange": {
+      "percentage": 0.4,
+      "allocation": 0.4
+    },
+    "rebalanceThreshold": 0.8
+  },
+  "riskManagement": {
+    "hardStop": {
+      "dailyDrop": 0.4,
+      "athDrop": 0.7
+    },
+    "liquidityDrain": {
+      "threshold": 0.3,
+      "period": 14
+    },
+    "socialActivity": {
+      "dropThreshold": 0.5
+    }
+  },
+  "tokens": [
+    {
+      "symbol": "BONK",
+      "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+      "enabled": true
+    },
+    {
+      "symbol": "WIF",
+      "mint": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+      "enabled": true
+    },
+    {
+      "symbol": "PENGU",
+      "mint": "2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv",
+      "enabled": true
+    }
+  ],
+  "monitoring": {
+    "alerts": {
+      "priceChange": 0.15,
+      "volumeChange": 0.5,
+      "liquidityChange": 0.3
+    },
+    "logLevel": "info"
+  }
+} 
