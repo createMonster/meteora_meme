@@ -1,0 +1,33 @@
+# Development Dockerfile with hot reload
+FROM node:20-alpine
+
+# Install development tools
+RUN apk add --no-cache git
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install all dependencies (including dev dependencies)
+RUN npm ci
+
+# Install nodemon globally for hot reload
+RUN npm install -g nodemon ts-node
+
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S meteora -u 1001
+
+# Create logs directory and set permissions
+RUN mkdir -p logs && chown -R meteora:nodejs /app
+
+# Switch to non-root user
+USER meteora
+
+# Expose ports
+EXPOSE 3000 9229
+
+# Development command with hot reload and debugging
+CMD ["npm", "run", "dev"] 

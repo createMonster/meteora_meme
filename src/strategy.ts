@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as cron from 'node-cron';
 import { config } from 'dotenv';
+import bs58 from 'bs58';
 
 import { StrategyConfig, TokenMetrics, Position, StrategyMetrics } from './types';
 import { DataProvider } from './providers/dataProvider';
@@ -55,13 +56,47 @@ export class MemePoolStrategy {
     }
 
     try {
-      // Decode base58 private key
-      const privateKeyBuffer = Buffer.from(privateKey, 'base64');
-      this.wallet = Keypair.fromSecretKey(privateKeyBuffer);
+      let secretKey: Uint8Array;
+
+      // Handle different private key formats
+      if (privateKey.startsWith('[') && privateKey.endsWith(']')) {
+        // JSON array format: [1,2,3,4,...] (64 numbers)
+        const keyArray = JSON.parse(privateKey);
+        if (!Array.isArray(keyArray) || keyArray.length !== 64) {
+          throw new Error('Invalid JSON array format - must be 64 numbers');
+        }
+        secretKey = new Uint8Array(keyArray);
+      } else if (privateKey.includes(',')) {
+        // Comma-separated format: "1,2,3,4,..."
+        const keyArray = privateKey.split(',').map(n => parseInt(n.trim()));
+        if (keyArray.length !== 64) {
+          throw new Error('Invalid comma-separated format - must be 64 numbers');
+        }
+        secretKey = new Uint8Array(keyArray);
+      } else if (privateKey.match(/^[0-9a-fA-F]+$/)) {
+        // Hex string format
+        if (privateKey.length !== 128) {
+          throw new Error('Invalid hex format - must be 128 characters (64 bytes)');
+        }
+        const keyArray = [];
+        for (let i = 0; i < privateKey.length; i += 2) {
+          keyArray.push(parseInt(privateKey.substr(i, 2), 16));
+        }
+        secretKey = new Uint8Array(keyArray);
+      } else {
+        // Base58 format (most common)
+        secretKey = bs58.decode(privateKey);
+        if (secretKey.length !== 64) {
+          throw new Error('Invalid base58 key - must decode to 64 bytes');
+        }
+      }
+
+      this.wallet = Keypair.fromSecretKey(secretKey);
       logger.info(`✓ Wallet initialized: ${this.wallet.publicKey.toString()}`);
     } catch (error) {
       logger.error('Failed to initialize wallet:', error);
-      throw new Error('Invalid private key format');
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Invalid private key format: ${errorMessage}`);
     }
   }
 

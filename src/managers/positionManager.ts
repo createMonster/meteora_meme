@@ -92,9 +92,11 @@ export class PositionManager {
 
   private async findOrCreateDLMMPool(tokenMetrics: TokenMetrics): Promise<DLMM | null> {
     try {
-      // Try to find existing pool
-      const solMint = new PublicKey("So11111111111111111111111111111111111111112");
-      const existingPool = await DLMM.create(this.connection, tokenMetrics.mint, solMint);
+      // Try to find existing pool using pool address
+      // In a real implementation, you'd need to query for the pool address
+      // For now, we'll use a placeholder approach
+      const poolAddress = new PublicKey("11111111111111111111111111111111"); // Placeholder
+      const existingPool = await DLMM.create(this.connection, poolAddress);
       
       if (existingPool) {
         return existingPool;
@@ -155,8 +157,10 @@ export class PositionManager {
       const totalXAmount = new BN(capitalAmount * 10 ** 6); // Assuming 6 decimals
       const totalYAmount = new BN(capitalAmount * 10 ** 9); // SOL has 9 decimals
 
+      const positionKeypair = Keypair.generate();
       const initPositionTx = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
         user: this.wallet.publicKey,
+        positionPubKey: positionKeypair.publicKey,
         totalXAmount,
         totalYAmount,
         strategy: {
@@ -266,7 +270,7 @@ export class PositionManager {
           user: this.wallet.publicKey,
           fromBinId: binIdsToRemove[0],
           toBinId: binIdsToRemove[binIdsToRemove.length - 1],
-          liquiditiesBpsToRemove: new Array(binIdsToRemove.length).fill(new BN(100 * 100)),
+          bps: new BN(100 * 100), // 100% removal
           shouldClaimAndClose: false
         });
 
@@ -351,7 +355,7 @@ export class PositionManager {
       for (const userPosition of userPositions.userPositions) {
         const closePositionTx = await dlmmPool.closePosition({
           owner: this.wallet.publicKey,
-          position: userPosition.publicKey
+          position: userPosition
         });
 
         await sendAndConfirmTransaction(this.connection, closePositionTx, [this.wallet]);

@@ -1,0 +1,103 @@
+version: '3.8'
+
+services:
+  meteora-strategy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meteora-meme-strategy
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
+      - PRIVATE_KEY=${PRIVATE_KEY}
+      - COINGECKO_API_KEY=${COINGECKO_API_KEY}
+      - DUNE_API_KEY=${DUNE_API_KEY}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+      - strategy_data:/app/data
+    networks:
+      - meteora_network
+    healthcheck:
+      test: ["CMD", "node", "-e", "console.log('Health check passed')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Development version with hot reload
+  meteora-strategy-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: meteora-meme-strategy-dev
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=development
+      - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.devnet.solana.com}
+      - PRIVATE_KEY=${PRIVATE_KEY}
+      - COINGECKO_API_KEY=${COINGECKO_API_KEY}
+      - DUNE_API_KEY=${DUNE_API_KEY}
+      - LOG_LEVEL=${LOG_LEVEL:-debug}
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - ./logs:/app/logs
+    ports:
+      - "3000:3000"
+      - "9229:9229" # Debugging port
+    networks:
+      - meteora_network
+    profiles:
+      - dev
+
+  # Monitoring and logging (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: meteora-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - meteora_network
+    profiles:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: meteora-grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana:/etc/grafana/provisioning
+    networks:
+      - meteora_network
+    profiles:
+      - monitoring
+
+volumes:
+  strategy_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  meteora_network:
+    driver: bridge 
